@@ -37,7 +37,10 @@ class MyClient(discord.Client):
         logger.info("Bot initialized successfully")
 
     async def on_member_update(self, before, after):
-        ## If a member updates their info, check to see if it was a team name change
+        """
+        If a member updates their info, check to see if it was a team name change.
+        If it is, update self.user_teams
+        """
         if before.display_name != after.display_name:
             before_team = _parse_team_from_display_name(before.display_name)
             after_team = _parse_team_from_display_name(after.display_name)
