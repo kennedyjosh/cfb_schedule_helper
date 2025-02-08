@@ -1,3 +1,4 @@
+import re
 import string
 
 STANDARDIZED_NAMES = [
@@ -150,23 +151,28 @@ def standardize(team):
         return team
 
     # Team name is standardized but capitalization is wrong
+    og_team = team
     team = team.lower().strip()
     if (index := _binary_search(team)) != -1:
         return STANDARDIZED_NAMES[index]
 
     # Try some common substitutions
     # TODO: add some more cases here, make this more robust
-    # Remove any punctuation
+    # Remove any punctuation or non-alpha symbols
+    team = re.compile("[^a-zA-Z ]").sub("", team)
     team.translate(str.maketrans('', '', string.punctuation))
     if (index := _binary_search(team)) != -1:
         return STANDARDIZED_NAMES[index]
 
     # 'app' -> 'appalachian'
-    team.replace("app ", "appalachian")
+    team = re.sub("^app ", "appalachian ", team)
+    # 'st' -> 'state'
+    team = re.sub(" st$", " state", team)
+    # last try to match the name
     if (index := _binary_search(team)) != -1:
         return STANDARDIZED_NAMES[index]
 
-    raise ValueError(f"Team not found: {team}")
+    raise ValueError(f"Team could not be standardized: {og_team}")
 
 
 def _binary_search(target: str) -> int:
@@ -190,3 +196,8 @@ def _binary_search(target: str) -> int:
     return -1
 
 
+if __name__ == "__main__":
+    ## TODO need formal tests for this file
+    assert standardize("Florida St") == "Florida State"
+    assert standardize("App State") == "Appalachian State"
+    assert standardize("Oregon+") == "Oregon"
