@@ -85,12 +85,10 @@ def validate(d):
        considered an error, but d will be modified to hold perfectly mirrored records.
     3. Home/away preferences compliment each other. If only one team has a preference, d will
        be updated for the other team to show the opposite preference
-    4. Team names are standardized. If not, d will be updated
 
     Returns True, d if the dict is valid – d may have been edited, but the fixes caused no conflict
     Return False, errors if dict is not valid, where errors is a list of error messages
     """
-    # TODO: standardize team names in d - do that here
     errors = []
     to_add = {}
     for team in d:

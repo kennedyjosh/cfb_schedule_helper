@@ -17,7 +17,7 @@ class MyClient(discord.Client):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.user_teams = {}  # guild-id : set(str)
-        self.state = {}  # guild-id : state  TODO: state enum?
+        self.state = {}  # guild-id : dict, with at least "state" : State entry
         # TODO: do something cleaner here
         assert "logger" in kwargs, "Must specify logger"
         self.logger = kwargs["logger"]
