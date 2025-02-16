@@ -155,40 +155,36 @@ class MyClient(discord.Client):
         elif state == State.NEED_SCHEDULES:
             state = self.state[guild_id]
             if message.channel.id == self.state[guild_id]["channel"]:
-                if (self.user_teams[guild_id]) == 0:
-                    # TODO: calculate optimal matchups and display results
-                    ...
-                else:
-                    # Process the existing schedule for a team
-                    team = state["currTeam"]
-                    schedule = {"balance": 0, "free_weeks": list(range(0, 15))}
-                    msg = message.content.split(" ")
+                # Process the existing schedule for a team
+                team = state["currTeam"]
+                schedule = {"balance": 0, "free_weeks": list(range(0, 15))}
+                msg = message.content.split(" ")
+                try:
+                    msg = [int(e.strip()) for e in msg]
+                except ValueError:
+                    await message.reply("Please be sure to only type numbers")
+                    await message.channel.send(f"Please re-enter the information for {team}")
+                    return
+                schedule["balance"] = msg[-1] - (len(msg) - msg[-1] - 1)
+                for week in msg[:-1]:
                     try:
-                        msg = [int(e.strip()) for e in msg]
-                    except ValueError:
-                        await message.reply("Please be sure to only type numbers")
+                        schedule["free_weeks"].remove(week)
+                    except:
+                        if week == 16 and team in ["Army", "Navy"]:
+                            continue
+                        await message.reply(f"Invalid or duplicate week: {week}")
                         await message.channel.send(f"Please re-enter the information for {team}")
                         return
-                    schedule["balance"] = msg[-1] - (len(msg) - msg[-1] - 1)
-                    for week in msg[:-1]:
-                        try:
-                            schedule["free_weeks"].remove(week)
-                        except:
-                            if week == 16 and team in ["Army", "Navy"]:
-                                continue
-                            await message.reply(f"Invalid or duplicate week: {week}")
-                            await message.channel.send(f"Please re-enter the information for {team}")
-                            return
-                    self.state[guild_id]["schedule"][team] = schedule
-                    if len(self.user_teams[guild_id]) == 0:
-                        # All done, now need to process schedules and write back
-                        # TODO
-                        ...
-                    else:
-                        next_team = self.user_teams[guild_id].pop(0)
-                        self.state[guild_id]["currTeam"] = next_team
-                        await message.channel.send(f"{next_team}")
-                    return
+                self.state[guild_id]["schedule"][team] = schedule
+                if len(self.user_teams[guild_id]) == 0:
+                    # All done, now need to process schedules and write back
+                    # TODO
+                    ...
+                else:
+                    next_team = self.user_teams[guild_id].pop(0)
+                    self.state[guild_id]["currTeam"] = next_team
+                    await message.channel.send(f"{next_team}")
+                return
 
         self.logger.debug(f'Ignored message from {message.author}: {message.content}')
 
