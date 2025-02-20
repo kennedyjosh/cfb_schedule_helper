@@ -1,7 +1,6 @@
 import discord
 import enum
 import re
-from sortedcontainers import SortedList
 import time
 import src.schedule_requests as schedule_requests
 from src.team_name_standardization import standardize
@@ -11,12 +10,14 @@ class State(enum.Enum):
     READY = 0
     NEED_REQUESTS = 1
     NEED_SCHEDULES = 2
+    FAILED = 3
 
 
 class MyClient(discord.Client):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.ignored_users = {}  # guild_id : list
         self.user_teams = {}  # guild-id : SortedList(str)
         self.state = {}  # guild-id : dict, with at least "state" : State entry
         # TODO: do something cleaner here
@@ -37,14 +38,20 @@ class MyClient(discord.Client):
         for guild in self.guilds:
             if guild.id not in self.user_teams:
                 self.user_teams[guild.id] = []
+                self.ignored_users[guild.id] = []
             for member in guild.members:
                 # parse all members except for the bot
                 if member.id != self.user.id:
-                    if "inactive" in member.name.lower():
+                    if "inactive" in member.display_name.lower():
                         self.logger.debug(f"ignoring: {member.display_name}")
+                        self.ignored_users[guild.id].append(member.display_name)
                         continue
                     # names are in the style 'Name - Team (Rank#)'
                     team = _parse_team_from_display_name(member.display_name)
+                    if team == None:
+                        self.logger.warning(f"Unable to process team for user: {member.display_name}")
+                        self.ignored_users[guild.id].append(member.display_name)
+                        continue
                     self.user_teams[guild.id].append(team)
             if guild.id not in self.state:
                 self.state[guild.id] = {}
@@ -73,6 +80,17 @@ class MyClient(discord.Client):
             self.logger.info(f"No action necessary, display name is the same ({before.display_name})")
 
     async def on_message(self, message):
+        try:
+            await self.handle_message(message)
+        except:
+            if self.state[message.guild.id]["state"] != State.FAILED:
+                await message.channel.send(f"Oh no! I have experienced a fatal error and will need "
+                                           f"to be manually restarted.")
+                self.logger.error(f"Fatal error on guild: {message.guild.name} ({message.guild.id})")
+                self.state[message.guild.id]["state"] = State.FAILED
+
+
+    async def handle_message(self, message):
         # Quick return if the message is coming from itself
         if message.author.id == self.user.id:
             return
@@ -88,9 +106,21 @@ class MyClient(discord.Client):
                                      f"updating state to {next_state}")
                     self.state[guild_id]["state"] = next_state
                     self.state[guild_id]["channel"] = message.channel.id
-                    await message.channel.send("Hi! Please copy/paste the schedule requests as a single message.\n"
-                                        "Please be aware that I will be reading and interpreting all messages "
-                                        "in this channel until my work is done, so keep it strictly business.")
+                    await message.channel.send(f"Hi!")
+                    if self.ignored_users[guild_id]:
+                        time.sleep(1)
+                        await message.channel.send(f"I've taken a look at the members in this server, and was "
+                                                   f"able to infer a team from everybody except for: "
+                                                   f"{', '.join(self.ignored_users[guild_id][:-1]) + ' and ' +
+                                                      self.ignored_users[guild_id][-1]}")
+                    time.sleep(1)
+                    await message.channel.send("Please be aware that I will be reading and interpreting all "
+                                               "messages in this channel until my work is done, so keep it "
+                                               "strictly business.")
+                    time.sleep(1)
+                    await message.channel.send("Let's start with the schedule requests. "
+                                               "Please copy/paste them as a single message.")
+
                     return
         elif state == State.NEED_REQUESTS:
             # In this state, it is time to process the schedule requests
@@ -157,7 +187,7 @@ class MyClient(discord.Client):
             if message.channel.id == self.state[guild_id]["channel"]:
                 # Process the existing schedule for a team
                 team = state["currTeam"]
-                schedule = {"balance": 0, "free_weeks": list(range(0, 15))}
+                schedule = {"balance": 0, "free_weeks": list(range(0, 14))}
                 msg = message.content.split(" ")
                 try:
                     msg = [int(e.strip()) for e in msg]
@@ -170,7 +200,7 @@ class MyClient(discord.Client):
                     try:
                         schedule["free_weeks"].remove(week)
                     except:
-                        if week == 16 and team in ["Army", "Navy"]:
+                        if week == 14 and team in ["Army", "Navy"]:
                             continue
                         await message.reply(f"Invalid or duplicate week: {week}")
                         await message.channel.send(f"Please re-enter the information for {team}")
@@ -190,5 +220,8 @@ class MyClient(discord.Client):
 
 
 def _parse_team_from_display_name(display_name):
-    return standardize(display_name.split("-")[1].split("(")[0].strip())
+    try:
+        return standardize(display_name.split("-")[1].split("(")[0].strip())
+    except IndexError:
+        return None
 

@@ -9,7 +9,7 @@ if __name__ == "__main__":
     # set up logging
     logger = logging.getLogger('bot')
     logger.setLevel(logging.DEBUG)
-    logging.getLogger('discord.http').setLevel(logging.INFO)
+    logging.getLogger('discord.http').setLevel(logging.DEBUG)
 
     # for errors that go to stderr
     # https://stackoverflow.com/a/31688396/11106258
