@@ -187,7 +187,7 @@ class MyClient(discord.Client):
             if message.channel.id == self.state[guild_id]["channel"]:
                 # Process the existing schedule for a team
                 team = state["currTeam"]
-                schedule = {"balance": 0, "free_weeks": list(range(0, 14))}
+                schedule = {"balance": 0, "free_weeks": list(range(0, 15))}
                 msg = message.content.split(" ")
                 try:
                     msg = [int(e.strip()) for e in msg]
@@ -208,7 +208,7 @@ class MyClient(discord.Client):
                 self.state[guild_id]["schedule"][team] = schedule
                 if len(self.user_teams[guild_id]) == 0:
                     # All done, now need to process schedules and write back
-                    # TODO
+                    # TODO: call scheduler.schedule
                     ...
                 else:
                     next_team = self.user_teams[guild_id].pop(0)
