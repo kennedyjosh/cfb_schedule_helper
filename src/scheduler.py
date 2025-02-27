@@ -11,7 +11,7 @@ def _matchup(t1, t2):
 # TODO: make sure teams with no requests are removed from both inputs
 
 # This should be the only function called from here
-def do_schedule(requests, schedule_info):
+def do_schedule(requests, schedule_info, max_iter=1000):
     """
     This function will take scheduling requests and current unchangeable schedule information
     and attempt to satisfy all requests for each team.
@@ -25,17 +25,62 @@ def do_schedule(requests, schedule_info):
              ( { team: { opponent: week }, { team: { opponent: isTeamHomeBool } },
              { team: {'home': int, 'away': int} },  { matchupOrTeam: reason } )
     """
-    schedule, schedule_errors = find_schedule(deepcopy(requests), schedule_info)
+    # Though the functions called are optimized to find the best schedules possible,
+    # it is very common for two paths to seem equally optimal. Thus, we inject some
+    # random element for when two teams are otherwise at equal footing. This can help
+    # generate alternate possibilities.
+
+    # An optimal schedule is one where all requests are fulfilled.
+    # Try generating different schedules until the optimal schedule is found.
+    optimal_schedule_found = False
+    curr_iter = 0
+    best_schedule = None
+    best_schedule_errors = None
+    best_error = float("inf")
+    best_seed = None
+    while not optimal_schedule_found and curr_iter < max_iter:
+        schedule, errors = find_schedule(deepcopy(requests), schedule_info, seed=curr_iter)
+        if (num_errors := len(errors)) < best_error:
+            best_schedule = schedule
+            best_schedule_errors = errors
+            best_seed = curr_iter
+            best_error = num_errors
+            if num_errors == 0:
+                optimal_schedule_found = True
+        curr_iter += 1
+    print(f"Best schedule found with error={len(best_schedule_errors)} at seed={best_seed}")
+
     # Need to update free_weeks for next function
     info = deepcopy(schedule_info)
     for team in info:
         for opp in schedule[team]:
             info[team]["free_weeks"].remove(schedule[team][opp])
-    homeGames, cpuGames, balance_errors = set_game_locations(deepcopy(schedule), deepcopy(info), requests)
+
+    # Try generating different home/away splits to find the one with the best overall balance
+    optimal_balance_found = False
+    curr_iter = 0
+    best_games = [None, None]
+    best_balance_errors = None
+    best_error = float("inf")
+    best_seed = None
+    while not optimal_balance_found and curr_iter < max_iter:
+        homeGames, cpuGames, errors = set_game_locations(deepcopy(schedule), deepcopy(info), deepcopy(requests), seed=curr_iter)
+        error = math.sqrt(sum([x ** 2 for x in errors.values()]))
+        if error < best_error:
+            best_games = [homeGames, cpuGames]
+            best_balance_errors = errors
+            best_error = error
+            best_seed = curr_iter
+            if error == 0:
+                optimal_balance_found = True
+        curr_iter += 1
+    print(f"Best balance found with error={best_error} at seed={best_seed}")
+
+    errors = best_schedule_errors | best_balance_errors
+    return best_schedule, best_games[0], best_games[1], errors
 
 
-
-def find_schedule(requests, current_schedules):
+def find_schedule(requests, current_schedules, seed=None):
     """
     This function takes schedule requests and current schedule information
     and attempts to find a week for all requests to be fulfilled.
@@ -49,6 +94,7 @@ def find_schedule(requests, current_schedules):
     seen = set()  # tuples of matchup teams in alpha order (use _matchup function)
     common_free_weeks = {}  # the matchup tuple will be the key, list of common free weeks the value
     priority_dict = {}  # track the priority of each matchup, they will be updated later
+    seeds = {}  # track random seed generated for each matchup, in case we need to remove and reinsert to the pq later
     pq = PriorityQueue()
     for team in requests:
         for opp in requests[team]:
@@ -61,7 +107,9 @@ def find_schedule(requests, current_schedules):
             common_free_weeks[matchup] = free_weeks_intersection
             priority = len(free_weeks_intersection) - max(len(requests[team]), len(requests[opp]))
             priority_dict[matchup] = priority
-            pq.put((priority, matchup))
+            seed = random.random() if seed is not None else 0
+            seeds[matchup] = seed
+            pq.put((priority, seed, matchup))
             seen.add(matchup)
 
     # Now, go through the priority queue.
@@ -74,7 +122,7 @@ def find_schedule(requests, current_schedules):
     errors = {}
     while not pq.empty():
         # Chose a week to schedule a matchup
-        _, matchup = pq.get()
+        _, _, matchup = pq.get()
         common_weeks = common_free_weeks[matchup]
         common_weeks_count = {week: 0 for week in common_weeks}  # maintain count of opponents also free these weeks
         for team in matchup:
@@ -114,9 +162,11 @@ def find_schedule(requests, current_schedules):
                     common_free_weeks[other_matchup].remove(chosen_week)
                     # We must now recalculate this matchup's spot in the priority queue and update it
                     new_priority = len(common_free_weeks[other_matchup]) - max(len(requests[team]), len(requests[opp]))
-                    pq.queue.remove((priority_dict[other_matchup], other_matchup))
+                    new_seed = random.random() if seed is not None else 0
+                    pq.queue.remove((priority_dict[other_matchup], seeds[other_matchup], other_matchup))
                     priority_dict[other_matchup] = new_priority
-                    pq.put((new_priority, other_matchup))
+                    seeds[other_matchup] = new_seed
+                    pq.put((new_priority, new_seed, other_matchup))
 
     return schedule, errors
 
@@ -197,7 +247,7 @@ def set_game_locations(schedule, info, preferences, respect_preferences=True, se
                 # as a first tiebreaker, take into account the priority of the users when it
                 # comes to this game: -1 if priority helps balance both, 0 if no priority,
                 #                     1 if priority exists but unbalances one
-                if (pref := requests[team][opp]) is not None:
+                if (pref := preferences[team][opp]) is not None:
                     if pref is True and adjustment < 0:
                         # team wants home and a home game would help balance
                         priority_flag = -1
@@ -327,89 +377,128 @@ if __name__ == "__main__":
         'USF': {"balance": -2, "free_weeks": SortedList([0, 1, 2, 4, 5, 6, 7])}
     }
 
-    schedule, schedule_errors = find_schedule(deepcopy(requests), starting_schedules)
+    schedule, homeGames, cpuGames, errors = do_schedule(requests, starting_schedules, max_iter=1000)
+    print()
+    # separate into matchmaking errors and home/away balance errors
+    schedule_errors = {}
+    balance_errors = {}
+    for error in errors:
+        if type(error) is tuple:
+            schedule_errors[error] = errors[error]
+        else:
+            balance_errors[error] = errors[error]
 
-    # pprint(result)
+    print(f"Found schedule with {len(schedule_errors)} scheduling errors and "
+          f"a balance error of {math.sqrt(sum([x ** 2 for x in errors.values()]))}")
 
-    # validate that games were only scheduled during free weeks
-    # also need this to call set_game_locations
-    for team in schedule:
-        scheduled_weeks = schedule[team].values()
-        for week in scheduled_weeks:
-            try:
-                starting_schedules[team]["free_weeks"].remove(week)
-            except:
-                f"Week {week} for {team} is not free!"
+    print("\n")
 
-    # pprint(schedules)
+    print("Schedule:")
+    pprint(schedule)
+    print("\nHome games:")
+    pprint(homeGames)
+    print("\nCPU games:")
+    pprint(cpuGames)
+    if len(schedule_errors) > 0:
+        print("\nSchedule errors:")
+        print(schedule_errors)
+    if len(balance_errors) > 0:
+        print("\nBalance errors:")
+        print(balance_errors)
 
-    # respect_prefs = True
-    # seed = 5
-    # homeGames, cpuGames, balance_errors = set_game_locations(deepcopy(schedule), deepcopy(starting_schedules), requests,
-    #                                                          respect_preferences=respect_prefs, seed=seed)
+    print()
 
-    # max_iter starts to take minutes when at 1mil
-    max_iter = 100
-    seed_range = 100
-    curr_iter = 0
-    still_trying = True
-    best = float("inf")
-    best_settings = [None, None]
-    chosen_setting = None
-    avg = {"pref": [0, 0], "nopref": [float('inf'), 1]}
-    pbar = tqdm.tqdm(total=max_iter)
-    next_rand = list(range(0, seed_range))
-    random.shuffle(next_rand)  # randomizes order of list in-place
-    while still_trying and curr_iter < max_iter and best != 0:
-        # try to choose the best method (pref/nopref) if at max_iter/2 iterations
-        if curr_iter == round(max_iter / 2):
-            pref_avg = avg["pref"][0] / avg["pref"][1]
-            nopref_avg = avg["nopref"][0] / avg["nopref"][1]
-            os.system("clear")
-            if math.isclose(pref_avg, nopref_avg, rel_tol=0.05):
-                print(f"Not choosing to respect preferences or not, "
-                      f"diff {pref_avg} ({avg['pref'][1]} pref obs.) vs {nopref_avg} ({avg['nopref'][1]} nopref obs.)")
-            elif pref_avg < nopref_avg:
-                print(f"Choosing to repsect preferences, "
-                      f"diff {pref_avg} ({avg['pref'][1]} obs.) vs {nopref_avg} ({avg['nopref'][1]} obs.)")
-                chosen_setting = True
-            elif nopref_avg < pref_avg:
-                print(f"Choosing not to repsect preferences, "
-                      f"diff {nopref_avg} ({avg['nopref'][1]} obs.) vs {pref_avg} ({avg['pref'][1]} obs.)")
-                chosen_setting = False
+    # Sanity check - schedules are full
+    for team in starting_schedules:
+        free_weeks = starting_schedules[team]["free_weeks"]
+        for opp in schedule[team]:
+            free_weeks.remove(schedule[team][opp])
+        if len(free_weeks) - cpuGames[team]["home"] - cpuGames[team]["away"] != 3:
+            print(f"Error: {team} does not have exactly 12 games scheduled")
 
-        respect_prefs = random.choice([True]) if chosen_setting is None else chosen_setting
-        seed = next_rand[curr_iter]
-        homeGames, cpuGames, balance_errors = set_game_locations(deepcopy(schedule), deepcopy(starting_schedules),
-                                                                 requests,
-                                                                 respect_preferences=respect_prefs, seed=seed)
-        error = math.sqrt(sum([x ** 2 for x in balance_errors.values()]))
-        if error < best:
-            best = error
-            best_settings = [respect_prefs, seed]
-        pref = "pref" if respect_prefs else "nopref"
-        avg[pref][0] += error
-        avg[pref][1] += 1
-        curr_iter += 1
-        pbar.update(1)
-
-    pbar.close()
-    respect_prefs = best_settings[0]
-    seed = best_settings[1]
-
-    if best == 0:
-        print(f"Exited early with optimal solution at {curr_iter} iterations")
-
-    # Check to make sure a team has a home/away for every user game
-    print(f"Issue teams: {', '.join([t for t in schedule if len(schedule[t]) != len(homeGames[t])])}")
-    # Check that a team is fully scheduled (only 3 free weeks after considering CPU games)
-    for team in cpuGames:
-        num_cpu_games = sum(cpuGames[team].values())
-        if (amt := len(starting_schedules[team]["free_weeks"]) - num_cpu_games) != 3:
-            print(f"{team} has {amt} bye weeks (should have 3)")
-    # Print error of chosen schedule
-    print("Errors:")
-    error = math.sqrt(sum([x**2 for x in balance_errors.values()]))
-    print(f"repsect_preferences={respect_prefs}, seed={seed}, error={error}")
-    print(balance_errors)
+    # schedule, schedule_errors = find_schedule(deepcopy(requests), starting_schedules)
+    #
+    # # pprint(result)
+    #
+    # # validate that games were only scheduled during free weeks
+    # # also need this to call set_game_locations
+    # for team in schedule:
+    #     scheduled_weeks = schedule[team].values()
+    #     for week in scheduled_weeks:
+    #         try:
+    #             starting_schedules[team]["free_weeks"].remove(week)
+    #         except:
+    #             f"Week {week} for {team} is not free!"
+    #
+    # # pprint(schedules)
+    #
+    # # respect_prefs = True
+    # # seed = 5
+    # # homeGames, cpuGames, balance_errors = set_game_locations(deepcopy(schedule), deepcopy(starting_schedules), requests,
+    # #                                                          respect_preferences=respect_prefs, seed=seed)
+    #
+    # # max_iter starts to take minutes when at 1mil
+    # max_iter = 100
+    # seed_range = 100
+    # curr_iter = 0
+    # still_trying = True
+    # best = float("inf")
+    # best_settings = [None, None]
+    # chosen_setting = None
+    # avg = {"pref": [0, 0], "nopref": [float('inf'), 1]}
+    # pbar = tqdm.tqdm(total=max_iter)
+    # next_rand = list(range(0, seed_range))
+    # random.shuffle(next_rand)  # randomizes order of list in-place
+    # while still_trying and curr_iter < max_iter and best != 0:
+    #     # try to choose the best method (pref/nopref) if at max_iter/2 iterations
+    #     if curr_iter == round(max_iter / 2):
+    #         pref_avg = avg["pref"][0] / avg["pref"][1]
+    #         nopref_avg = avg["nopref"][0] / avg["nopref"][1]
+    #         os.system("clear")
+    #         if math.isclose(pref_avg, nopref_avg, rel_tol=0.05):
+    #             print(f"Not choosing to respect preferences or not, "
+    #                   f"diff {pref_avg} ({avg['pref'][1]} pref obs.) vs {nopref_avg} ({avg['nopref'][1]} nopref obs.)")
+    #         elif pref_avg < nopref_avg:
+    #             print(f"Choosing to repsect preferences, "
+    #                   f"diff {pref_avg} ({avg['pref'][1]} obs.) vs {nopref_avg} ({avg['nopref'][1]} obs.)")
+    #             chosen_setting = True
+    #         elif nopref_avg < pref_avg:
+    #             print(f"Choosing not to repsect preferences, "
+    #                   f"diff {nopref_avg} ({avg['nopref'][1]} obs.) vs {pref_avg} ({avg['pref'][1]} obs.)")
+    #             chosen_setting = False
+    #
+    #     respect_prefs = random.choice([True]) if chosen_setting is None else chosen_setting
+    #     seed = next_rand[curr_iter]
+    #     homeGames, cpuGames, balance_errors = set_game_locations(deepcopy(schedule), deepcopy(starting_schedules),
+    #                                                              requests,
+    #                                                              respect_preferences=respect_prefs, seed=seed)
+    #     error = math.sqrt(sum([x ** 2 for x in balance_errors.values()]))
+    #     if error < best:
+    #         best = error
+    #         best_settings = [respect_prefs, seed]
+    #     pref = "pref" if respect_prefs else "nopref"
+    #     avg[pref][0] += error
+    #     avg[pref][1] += 1
+    #     curr_iter += 1
+    #     pbar.update(1)
+    #
+    # pbar.close()
+    # respect_prefs = best_settings[0]
+    # seed = best_settings[1]
+    #
+    # if best == 0:
+    #     print(f"Exited early with optimal solution at {curr_iter} iterations")
+    #
+    # # Check to make sure a team has a home/away for every user game
+    # print(f"Issue teams: {', '.join([t for t in schedule if len(schedule[t]) != len(homeGames[t])])}")
+    # # Check that a team is fully scheduled (only 3 free weeks after considering CPU games)
+    # for team in cpuGames:
+    #     num_cpu_games = sum(cpuGames[team].values())
+    #     if (amt := len(starting_schedules[team]["free_weeks"]) - num_cpu_games) != 3:
+    #         print(f"{team} has {amt} bye weeks (should have 3)")
+    # # Print error of chosen schedule
+    # print("Errors:")
+    # error = math.sqrt(sum([x**2 for x in balance_errors.values()]))
+    # print(f"repsect_preferences={respect_prefs}, seed={seed}, error={error}")
+    # print(balance_errors)
 
