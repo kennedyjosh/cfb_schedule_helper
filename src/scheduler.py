@@ -11,7 +11,7 @@ def _matchup(t1, t2):
 # TODO: make sure teams with no requests are removed from both inputs
 
 # This should be the only function called from here
-def schedule(requests, schedule_info):
+def do_schedule(requests, schedule_info):
     """
     This function will take scheduling requests and current unchangeable schedule information
     and attempt to satisfy all requests for each team.
@@ -25,7 +25,13 @@ def schedule(requests, schedule_info):
              ( { team: { opponent: week }, { team: { opponent: isTeamHomeBool } },
              { team: {'home': int, 'away': int} },  { matchupOrTeam: reason } )
     """
-    schedule, errors = find_schedule(deepcopy(requests), schedule_info)
+    schedule, schedule_errors = find_schedule(deepcopy(requests), schedule_info)
+    # Need to update free_weeks for next function
+    info = deepcopy(schedule_info)
+    for team in info:
+        for opp in schedule[team]:
+            info[team]["free_weeks"].remove(schedule[team][opp])
+    homeGames, cpuGames, balance_errors = set_game_locations(deepcopy(schedule), deepcopy(info), requests)
 
 
 
@@ -115,10 +121,157 @@ def find_schedule(requests, current_schedules):
     return schedule, errors
 
 
+def set_game_locations(schedule, info, preferences, respect_preferences=True, seed=None):
+    """
+    This function will take a schedule and the remaining free weeks for each team and
+    decide the location of all games, trying to maintain balance. If it can, it will keep
+    home/away preferences. The returned data will be a dict specifying whether each opponent is
+    a home game or not plus another dict explaining how many and where the CPU games need to be.
+    The `schedule` and `info` parameters may be modified, so it is recommended to pass a copy.
+    If `respect_preferences` is true, the algorithm will try to take into account home/away preferences.
+    If `seed` is given, it will add some random element to tiebreaker when 2 teams are in an identical siutation.
+
+    `schedule`: { team : { opponent : week } }
+    `info`: `schedule`: { team: { "balance": int, "free_weeks": list(int) } }
+    `preferences`: { team: { opponent: bool or None } }
+    `respect_preferences`: bool
+    `seed`: int or None
+    returns: a tuple with a dict of home/away settings,  a dict of what each teams' CPU schedule
+             needs to be, and a dict of any unbalanced schedules
+             ( { team: { opponent: isTeamHomeBool } }, { team: {'home': int, 'away': int} },
+              { team: balance })
+    """
+    if seed:
+        random.seed(seed)
+    # Pre-processing: for free-weeks (in info dict) we only care how many there are, not what they are
+    for team in info:
+        info[team]["free_weeks"] = len(info[team]["free_weeks"])
+
+    # Want to process teams in order of how unbalanced their schedule is and how many user games they have.
+    # Use priority queue: -1 * ( abs(balance) + num_user_games
+    pq = PriorityQueue()
+    settings = {}
+    cpuGames = {}
+    seeds = {}
+    for team in schedule:
+        seeds[team] = random.random() if seed else 0
+        if info[team]["balance"] != 0:
+            pq.put((-1 * (info[team]["balance"] + len(schedule[team])), seeds[team], team))
+        settings[team] = {}
+        cpuGames[team] = {"home": 0, "away": 0}
+
+    # Now, process each team from the priority queue.
+    # The general approach is going to take the minimum number of actions
+    # to balance a team's schedule. Ideally, at the end of this step, teams will all have a balance
+    # of 0, even if they still have games left to decide the setting of.
+    # Approach:
+    #  1. Try and balance schedule using CPU games
+    #  2. Try and balance schedule using user games: schedule user who is most unbalanced in the opposite
+    #     direction, first
+    # Be sure to re-calculate team priorities and re-insert them into the priority queue when needed.
+    errors = {}
+    while not pq.empty():
+        _, _, team = pq.get()
+        init_balance = info[team]["balance"]
+        abs_init_balance = abs(init_balance)
+        init_num_user_games = len(schedule[team])
+        num_cpu_games = info[team]["free_weeks"] - 3  # there are exactly 3 bye weeks for each team
+        adjustment = 1 if init_balance < 0 else -1  # adjustment = 1 to add home games, -1 to add away games
+        # First, try and use CPU games to balance the schedule
+        if num_cpu_games > 0:
+            setting = "home" if adjustment == 1 else "away"
+            if num_cpu_games <= abs_init_balance:
+                # Use CPU gqmes to try and balance
+                num_games = min(num_cpu_games, abs_init_balance)
+                cpuGames[team][setting] += num_games
+                # Adjust info dict to reflect added CPU games
+                info[team]["balance"] += (adjustment * num_games)
+                info[team]["free_weeks"] -= num_games
+        # Now, try to balance with user games, starting with users who are most unbalanced in the opposite direction
+        balance = info[team]["balance"]
+        if balance == 0: continue  # if scheduled was balanced in previous step
+        setting = True if adjustment == 1 else False  # true is home
+        opp_pq = PriorityQueue()
+        for opp in schedule[team]:
+            if opp not in settings[team]:  # skip teams we already scheduled against
+                # as a first tiebreaker, take into account the priority of the users when it
+                # comes to this game: -1 if priority helps balance both, 0 if no priority,
+                #                     1 if priority exists but unbalances one
+                if (pref := requests[team][opp]) is not None:
+                    if pref is True and adjustment < 0:
+                        # team wants home and a home game would help balance
+                        priority_flag = -1
+                    elif pref is False and adjustment > 0:
+                        # team wants away and away would help balance
+                        priority_flag = -1
+                    else:
+                        # whatever team wants would hurt the balance
+                        priority_flag = 1
+                else:
+                    priority_flag = 0
+                # Override the priority flag if we are ignoring preferences
+                if respect_preferences is False:
+                    priority_flag = 0
+                opp_pq.put((priority_flag, abs(info[opp]["balance"] - balance), random.random() if seed else 0, opp))
+        while balance != 0 and not opp_pq.empty():
+            _, _, _, opp = opp_pq.get()
+            settings[team][opp] = setting
+            balance += adjustment
+            # Update opp's info and position in the priority queue
+            old_priority = -1 * (info[opp]["balance"] + (len(schedule[opp]) - len(settings[opp])))
+            old_seed = seeds[opp]
+            settings[opp][team] = not setting
+            info[opp]["balance"] += (-1 * adjustment)
+            new_priority = -1 * (info[opp]["balance"] + (len(schedule[opp]) - len(settings[opp])))
+            new_seed = random.random() if seed else 0
+            seeds[opp] = new_seed
+            if abs(info[opp]["balance"]) != 1:
+                # Old element will not exist if balance was previously 0
+                pq.queue.remove((old_priority, old_seed, opp))
+            if info[opp]["balance"] != 0:
+                # Do not insert back into priority queue if balance is 0
+                pq.put((new_priority, new_seed, opp))
+        info[team]["balance"] = balance
+        # At this point, either the balance is 0 or it is impossible to balance the schedule
+        # If the balance is not 0, log the error
+        # If the balance is 0, nothing more to do here
+        if balance != 0:
+            errors[team] = balance
+    # We can now assume that either a team's balance is 0 and/or they have no more user games to decide
+    # the setting for. Now, instruct on any CPU games that may be remaining
+    for team in info:
+        if (free_weeks := info[team]["free_weeks"]) != 3:
+            num_needed = free_weeks - 3
+            assert num_needed > 0
+            # Branch here depending on if the team is balanced or not
+            if (balance := info[team]["balance"]) == 0:
+                # Split the difference between home/away to keep balance
+                # If an odd number of games is needed, this will result in a half game for each,
+                # representing user's choice.
+                cpuGames[team]["home"] += (num_needed / 2)
+                cpuGames[team]["away"] += (num_needed / 2)
+            else:
+                # Balance team using CPU games first, then split evenly
+                # Note: not sure if it is even possible to reach this case, but better safe than sorry
+                adjustment = 1 if balance < 0 else -1
+                num = min(abs(balance), num_needed)
+                setting = "home" if adjustment == 1 else "away"
+                cpuGames[team][setting] += num
+                balance += (adjustment * num)
+                num_needed -= num
+                if balance == 0 and num_needed > 0:
+                    # Split the difference between remaining games needed, see other branch of parent if
+                    cpuGames[team]["home"] += (num_needed / 2)
+                    cpuGames[team]["away"] += (num_needed / 2)
+
+    return settings, cpuGames, errors
 
 
 if __name__ == "__main__":
     from pprint import pprint
+    import math
+    import tqdm
+    import os
 
     # TODO: proper test cases
     requests = {
@@ -147,7 +300,7 @@ if __name__ == "__main__":
         'Western Michigan': {'Appalachian State': True, 'Colorado': False, 'Utah': False},
         'USF': {'UCF': None}
     }
-    schedules = {
+    starting_schedules = {
         'Clemson': {"balance": 0, "free_weeks": SortedList([0, 1, 2, 3, 11, 12, 13])},
         'Miami': {"balance": -2, "free_weeks": SortedList([0, 1, 2, 3, 4, 5, 8])},
         'Florida State': {"balance": -2, "free_weeks": SortedList([0, 1, 2, 3, 4, 7, 13])},
@@ -174,18 +327,89 @@ if __name__ == "__main__":
         'USF': {"balance": -2, "free_weeks": SortedList([0, 1, 2, 4, 5, 6, 7])}
     }
 
-    result, errors = find_schedule(deepcopy(requests), schedules)
+    schedule, schedule_errors = find_schedule(deepcopy(requests), starting_schedules)
 
-    pprint(result)
+    # pprint(result)
 
     # validate that games were only scheduled during free weeks
-    for team in result:
-        scheduled_weeks = result[team].values()
+    # also need this to call set_game_locations
+    for team in schedule:
+        scheduled_weeks = schedule[team].values()
         for week in scheduled_weeks:
             try:
-                schedules[team]["free_weeks"].remove(week)
+                starting_schedules[team]["free_weeks"].remove(week)
             except:
                 f"Week {week} for {team} is not free!"
 
-    pprint(schedules)
+    # pprint(schedules)
+
+    # respect_prefs = True
+    # seed = 5
+    # homeGames, cpuGames, balance_errors = set_game_locations(deepcopy(schedule), deepcopy(starting_schedules), requests,
+    #                                                          respect_preferences=respect_prefs, seed=seed)
+
+    # max_iter starts to take minutes when at 1mil
+    max_iter = 100
+    seed_range = 100
+    curr_iter = 0
+    still_trying = True
+    best = float("inf")
+    best_settings = [None, None]
+    chosen_setting = None
+    avg = {"pref": [0, 0], "nopref": [float('inf'), 1]}
+    pbar = tqdm.tqdm(total=max_iter)
+    next_rand = list(range(0, seed_range))
+    random.shuffle(next_rand)  # randomizes order of list in-place
+    while still_trying and curr_iter < max_iter and best != 0:
+        # try to choose the best method (pref/nopref) if at max_iter/2 iterations
+        if curr_iter == round(max_iter / 2):
+            pref_avg = avg["pref"][0] / avg["pref"][1]
+            nopref_avg = avg["nopref"][0] / avg["nopref"][1]
+            os.system("clear")
+            if math.isclose(pref_avg, nopref_avg, rel_tol=0.05):
+                print(f"Not choosing to respect preferences or not, "
+                      f"diff {pref_avg} ({avg['pref'][1]} pref obs.) vs {nopref_avg} ({avg['nopref'][1]} nopref obs.)")
+            elif pref_avg < nopref_avg:
+                print(f"Choosing to repsect preferences, "
+                      f"diff {pref_avg} ({avg['pref'][1]} obs.) vs {nopref_avg} ({avg['nopref'][1]} obs.)")
+                chosen_setting = True
+            elif nopref_avg < pref_avg:
+                print(f"Choosing not to repsect preferences, "
+                      f"diff {nopref_avg} ({avg['nopref'][1]} obs.) vs {pref_avg} ({avg['pref'][1]} obs.)")
+                chosen_setting = False
+
+        respect_prefs = random.choice([True]) if chosen_setting is None else chosen_setting
+        seed = next_rand[curr_iter]
+        homeGames, cpuGames, balance_errors = set_game_locations(deepcopy(schedule), deepcopy(starting_schedules),
+                                                                 requests,
+                                                                 respect_preferences=respect_prefs, seed=seed)
+        error = math.sqrt(sum([x ** 2 for x in balance_errors.values()]))
+        if error < best:
+            best = error
+            best_settings = [respect_prefs, seed]
+        pref = "pref" if respect_prefs else "nopref"
+        avg[pref][0] += error
+        avg[pref][1] += 1
+        curr_iter += 1
+        pbar.update(1)
+
+    pbar.close()
+    respect_prefs = best_settings[0]
+    seed = best_settings[1]
+
+    if best == 0:
+        print(f"Exited early with optimal solution at {curr_iter} iterations")
+
+    # Check to make sure a team has a home/away for every user game
+    print(f"Issue teams: {', '.join([t for t in schedule if len(schedule[t]) != len(homeGames[t])])}")
+    # Check that a team is fully scheduled (only 3 free weeks after considering CPU games)
+    for team in cpuGames:
+        num_cpu_games = sum(cpuGames[team].values())
+        if (amt := len(starting_schedules[team]["free_weeks"]) - num_cpu_games) != 3:
+            print(f"{team} has {amt} bye weeks (should have 3)")
+    # Print error of chosen schedule
+    print("Errors:")
+    error = math.sqrt(sum([x**2 for x in balance_errors.values()]))
+    print(f"repsect_preferences={respect_prefs}, seed={seed}, error={error}")
+    print(balance_errors)
 
