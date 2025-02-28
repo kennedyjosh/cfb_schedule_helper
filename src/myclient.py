@@ -3,6 +3,7 @@ import enum
 import re
 import time
 import src.schedule_requests as schedule_requests
+import src.scheduler as scheduler
 from src.team_name_standardization import standardize
 
 
@@ -10,7 +11,8 @@ class State(enum.Enum):
     READY = 0
     NEED_REQUESTS = 1
     NEED_SCHEDULES = 2
-    FAILED = 3
+    READ_SCHEDULES = 3
+    FAILED = 4
 
 
 class MyClient(discord.Client):
@@ -24,6 +26,34 @@ class MyClient(discord.Client):
         assert "logger" in kwargs, "Must specify logger"
         self.logger = kwargs["logger"]
 
+    def _scrape_teams(self, guild_id, members=None):
+        if members is None:
+            # Need to find guild with that id and fetch the members manually
+            guild = [g for g in self.guilds if g.id == guild_id]
+            if len(guild) != 0:
+                raise ValueError(f"Bad guild id: {guild_id}")
+            members = guild[0].members
+        self.user_teams[guild_id] = []
+        self.ignored_users[guild_id] = []
+        for member in members:
+            # parse all members except for the bot
+            if member.id != self.user.id:
+                if "inactive" in member.display_name.lower():
+                    self.logger.debug(f"ignoring: {member.display_name}")
+                    self.ignored_users[guild_id].append(member.display_name)
+                    continue
+                # names are in the style 'Name - Team (Rank#)'
+                try:
+                    team = _parse_team_from_display_name(member.display_name)
+                except IndexError:
+                    self.logger.error(f"Unexpected member name: {member.display_name}")
+                    team = None
+                if team == None:
+                    self.logger.warning(f"Unable to process team for user: {member.display_name}")
+                    self.ignored_users[guild_id].append(member.display_name)
+                    continue
+                self.user_teams[guild_id].append(team)
+
     async def on_error(self, event, *args, **kwargs):
         """
         For errors that occur during one of the client functions
@@ -36,23 +66,7 @@ class MyClient(discord.Client):
 
         self.logger.info(f"Inferring user-controlled teams from user names...")
         for guild in self.guilds:
-            if guild.id not in self.user_teams:
-                self.user_teams[guild.id] = []
-                self.ignored_users[guild.id] = []
-            for member in guild.members:
-                # parse all members except for the bot
-                if member.id != self.user.id:
-                    if "inactive" in member.display_name.lower():
-                        self.logger.debug(f"ignoring: {member.display_name}")
-                        self.ignored_users[guild.id].append(member.display_name)
-                        continue
-                    # names are in the style 'Name - Team (Rank#)'
-                    team = _parse_team_from_display_name(member.display_name)
-                    if team == None:
-                        self.logger.warning(f"Unable to process team for user: {member.display_name}")
-                        self.ignored_users[guild.id].append(member.display_name)
-                        continue
-                    self.user_teams[guild.id].append(team)
+            self._scrape_teams(guild.id, members=guild.members)
             if guild.id not in self.state:
                 self.state[guild.id] = {}
             self.state[guild.id]["state"] = State.READY
@@ -208,13 +222,88 @@ class MyClient(discord.Client):
                 self.state[guild_id]["schedule"][team] = schedule
                 if len(self.user_teams[guild_id]) == 0:
                     # All done, now need to process schedules and write back
-                    # TODO: call scheduler.schedule
-                    ...
+                    await message.channel.send("Okay, now give me some time to calculate an optimal schedule.")
+                    # First, though, remove teams from requests and schedule
+                    starting_schedules = self.state[guild_id]["schedule"]
+                    for team in (requests := self.state[guild_id]["requests"]):
+                        if len(requests[team]) == 0:
+                            del requests[team]
+                        if team in starting_schedules and len(starting_schedules[team]) == 0:
+                            del starting_schedules[team]
+                    # Call scheduler and process results
+                    schedule, homeGames, cpuGames, errors = scheduler.do_schedule(requests, starting_schedules, max_iter=100000)
+                    # Separate into matchmaking errors and home/away balance errors
+                    schedule_errors = {}
+                    balance_errors = {}
+                    for error in errors:
+                        if type(error) is tuple:
+                            schedule_errors[error] = errors[error]
+                        else:
+                            balance_errors[error] = errors[error]
+                    self.state[guild_id]["schedule"] = schedule
+                    self.state[guild_id]["home"] = homeGames
+                    self.state[guild_id]["cpu"] = cpuGames
+                    next_state = State.READ_SCHEDULES
+                    self.logger.info(f"Processed schedule, changing state to {next_state}")
+                    self.logger.debug(f"schedule: {schedule}")
+                    self.logger.debug(f"homeGames: {homeGames}")
+                    self.logger.debug(f"cpuGames: {cpuGames}")
+                    self.logger.debug(f"errors: {errors}")
+                    self.state[guild_id]["state"] = next_state
+                    self.state[guild_id]["seen_teams"] = set()
+                    time.sleep(1)
+                    # TODO tell user about errors here
+                    await message.channel.send(f"Okay, I have the schedule. We'll go through it one team at a time."
+                                               f"What team do you want to start with?")
+                    return
                 else:
                     next_team = self.user_teams[guild_id].pop(0)
                     self.state[guild_id]["currTeam"] = next_team
                     await message.channel.send(f"{next_team}")
                 return
+
+        elif state == State.READ_SCHEDULES:
+            if message.channel.id == self.state[guild_id]["channel"]:
+                try:
+                    team = standardize(message.content.strip())
+                except ValueError:
+                    await message.reply(f"I'm not sure what team that is, could you spell it out more plainly?")
+                    return
+                schedule = self.state[guild_id]["schedule"]
+                if team not in schedule:
+                    await message.reply(f"This team didn't have any requests, and therefore, I did not "
+                                        f"build a schedule for them. You will have to give them CPU games "
+                                        f"and balance the home/away yourself.")
+                    return
+                schedule = schedule[team]
+                homeGames = self.state[guild_id]["home"][team]
+                cpuGames = self.state[guild_id]["cpu"][team]
+                msg = f"Schedule details for {team}:\n"
+                schedule_tuples = sorted([(v, k) for k,v in schedule.items()])
+                for week, opponent in schedule_tuples:
+                    msg += f"* Week {week} {'vs' if homeGames[opponent] else 'at'} {opponent}\n"
+                if sum(cpuGames.values()) > 0:
+                    msg += "Additionally, schedule "
+                    tmp_str = [f"{n} {setting} CPU game{'s' if n != 1 else ''}" for n, setting in
+                               [(int(cpuGames[k]), k) for k, v in cpuGames]]
+                    if int(cpuGames["home"]) != cpuGames["home"]:
+                        # Test to see if there is a 0.5 in the dict values - if so, the game can be home or away
+                        tmp_str.append(f"1 CPU game that can be either home or away")
+                    msg += ', '.join(tmp_str[:-1]) + " and " + tmp_str[-1] + ".\n"
+
+                time.sleep(1)
+                self.state[guild_id]["seen_teams"].add(team)
+                if len(self.state[guild_id]["seen_teams"]) == len(self.state[guild_id]["schedule"]):
+                    await message.channel.send("That's all the teams. My work here is done. To restart "
+                                               "the process, just tag me again.")
+                    next_state = State.READY
+                    self.logger.info(f"Finished, resetting state to {next_state}")
+                    self.state[guild_id] = {"state": next_state}
+                    self._scrape_teams(guild_id)
+                else:
+                    await message.channel.send("What's the next team you'd like to see the schedule for?")
+                return
+
 
         self.logger.debug(f'Ignored message from {message.author}: {message.content}')
 
@@ -222,6 +311,6 @@ class MyClient(discord.Client):
 def _parse_team_from_display_name(display_name):
     try:
         return standardize(display_name.split("-")[1].split("(")[0].strip())
-    except IndexError:
+    except ValueError:
         return None
 

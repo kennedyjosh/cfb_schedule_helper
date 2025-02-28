@@ -8,8 +8,6 @@ def _matchup(t1, t2):
      return (min(t1, t2), max(t1, t2))
 
 
-# TODO: make sure teams with no requests are removed from both inputs
-
 # This should be the only function called from here
 def do_schedule(requests, schedule_info, max_iter=1000):
     """
@@ -25,6 +23,8 @@ def do_schedule(requests, schedule_info, max_iter=1000):
              ( { team: { opponent: week }, { team: { opponent: isTeamHomeBool } },
              { team: {'home': int, 'away': int} },  { matchupOrTeam: reason } )
     """
+    # Note: teams with no requests should be removed from the inputs prior to reaching this function
+
     # Though the functions called are optimized to find the best schedules possible,
     # it is very common for two paths to seem equally optimal. Thus, we inject some
     # random element for when two teams are otherwise at equal footing. This can help
