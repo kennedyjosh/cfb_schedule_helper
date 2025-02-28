@@ -8,6 +8,7 @@ def _matchup(t1, t2):
      return (min(t1, t2), max(t1, t2))
 
 
+# TODO: if users requested a game vs the CPU, be sure to explicitly mention that somewhere in the result of this method
 # This should be the only function called from here
 def do_schedule(requests, schedule_info, max_iter=1000):
     """
