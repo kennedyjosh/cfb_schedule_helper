@@ -252,9 +252,36 @@ class MyClient(discord.Client):
                     self.state[guild_id]["state"] = next_state
                     self.state[guild_id]["seen_teams"] = set()
                     time.sleep(1)
-                    # TODO tell user about errors here
-                    await message.channel.send(f"Okay, I have the schedule. We'll go through it one team at a time."
-                                               f"What team do you want to start with?")
+                    await message.channel.send(f"Okay, I have the schedule.\n")
+                    if schedule_errors or balance_errors:
+                        time.sleep(1)
+                        await message.channel.send(f"Unfortunately, given all the requests and the locked "
+                                                   f"conference schedules, it was not possible to make a "
+                                                   f"perfect schedule.\n")
+                        if not schedule_errors:
+                            time.sleep(1)
+                            await message.channel.send(f"Thankfully, I was able to fill all the requests, I just "
+                                                       f"couldn't give everyone a perfectly balanced schedule.")
+                        if not balance_errors:
+                            time.sleep(1)
+                            await message.channel.send("Unfortunately, I was unable to fulfill all the scheduling "
+                                                       "requests. On the bright side, I was able to give everyone "
+                                                       "a perfectly balanced home/away slate.")
+                        time.sleep(1)
+                        msg = "Here are the issues with the schedule I created:\n"
+                        for error in schedule_errors:
+                            msg += (f"* {error[0]} vs {error[1]} couldn't be scheduled as they didn't have "
+                                    f"enough weeks in common.\n")
+                        for error in balance_errors:
+                            bal = balance_errors[error]
+                            msg += (f"* {error} has an unbalanced schedule with {abs(bal)} "
+                                    f"more {'home' if bal > 0 else 'away'} game{'s' if abs(bal) != 1 else ''} "
+                                    f"than they would ideally have.\n")
+                        await message.channel.send(msg)
+                        time.sleep(1)
+                    time.sleep(1)
+                    await message.channel.send("Now, I'll tell you the schedule one team at a time. You just "
+                                               "tell me the team and I'll give you their schedule. Ready? Go! ")
                     return
                 else:
                     next_team = self.user_teams[guild_id].pop(0)
