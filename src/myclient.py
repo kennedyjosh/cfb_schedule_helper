@@ -1,3 +1,4 @@
+from copy import deepcopy
 import discord
 import enum
 import re
@@ -80,8 +81,12 @@ class MyClient(discord.Client):
         If it is, update self.user_teams
         """
         if before.display_name != after.display_name:
+            self.logger.info(f"Maybe change from {before.display_name} to {after.display_name}")
             before_team = _parse_team_from_display_name(before.display_name)
             after_team = _parse_team_from_display_name(after.display_name)
+            # TODO: this is a hotfix
+            if None in [before_team, after_team]:
+                self.logger.error("Could not update name due to error processing the team from the name")
             if before_team != after_team:
                 guild_id = before.guild.id
                 self.user_teams[guild_id].remove(before_team)
@@ -96,7 +101,7 @@ class MyClient(discord.Client):
     async def on_message(self, message):
         try:
             await self.handle_message(message)
-        except:
+        except Exception as e:
             if self.state[message.guild.id]["state"] != State.FAILED:
                 await message.channel.send(f"Oh no! I have experienced a fatal error and will need "
                                            f"to be manually restarted.")
@@ -190,7 +195,13 @@ class MyClient(discord.Client):
                                            "games in weeks 4-6, 8-11, and 13, and that 6 of them are home games.")
                 time.sleep(2)
                 await message.channel.send("Okay, here we go. I'm going to list a team and then wait for your reply.")
-                team = self.user_teams[guild_id].pop(0)
+                self.state[guild_id]["user_teams"] = deepcopy(self.user_teams[guild_id])
+                user_teams = self.state[guild_id]["user_teams"]
+                # Remove teams that didn't have any requests so that the user doesn't fill useless info later
+                to_rm = [t for t in user_teams if t not in result or len(result[t]) == 0]
+                for team in to_rm:
+                    user_teams.remove(team)
+                team = self.state[guild_id]["user_teams"].pop(0)
                 self.state[guild_id]["currTeam"] = team
                 await message.channel.send(team)
                 return
@@ -201,7 +212,7 @@ class MyClient(discord.Client):
             if message.channel.id == self.state[guild_id]["channel"]:
                 # Process the existing schedule for a team
                 team = state["currTeam"]
-                schedule = {"balance": 0, "free_weeks": list(range(0, 15))}
+                schedule = {"balance": 0, "free_weeks": list(range(0, 14))}
                 msg = message.content.split(" ")
                 try:
                     msg = [int(e.strip()) for e in msg]
@@ -220,15 +231,20 @@ class MyClient(discord.Client):
                         await message.channel.send(f"Please re-enter the information for {team}")
                         return
                 self.state[guild_id]["schedule"][team] = schedule
-                if len(self.user_teams[guild_id]) == 0:
+                if len(self.state[guild_id]["user_teams"]) == 0:
                     # All done, now need to process schedules and write back
                     await message.channel.send("Okay, now give me some time to calculate an optimal schedule.")
-                    # First, though, remove teams from requests and schedule
+                    # First, though, remove teams from requests and schedule that don't have any requests
+                    # or that aren't a user team
                     starting_schedules = self.state[guild_id]["schedule"]
-                    for team in (requests := self.state[guild_id]["requests"]):
-                        if len(requests[team]) == 0:
-                            del requests[team]
-                        if team in starting_schedules and len(starting_schedules[team]) == 0:
+                    to_del = []
+                    requests = self.state[guild_id]["requests"]
+                    for team in requests:
+                        if len(requests[team]) == 0 or team not in self.user_teams[guild_id]:
+                            to_del.append(team)
+                    for team in to_del:
+                        del requests[team]
+                        if team in starting_schedules:
                             del starting_schedules[team]
                     # Call scheduler and process results
                     schedule, homeGames, cpuGames, errors = scheduler.do_schedule(requests, starting_schedules, max_iter=100000)
@@ -245,11 +261,11 @@ class MyClient(discord.Client):
                     self.state[guild_id]["cpu"] = cpuGames
                     next_state = State.READ_SCHEDULES
                     self.logger.info(f"Processed schedule, changing state to {next_state}")
+                    self.state[guild_id]["state"] = next_state
                     self.logger.debug(f"schedule: {schedule}")
                     self.logger.debug(f"homeGames: {homeGames}")
                     self.logger.debug(f"cpuGames: {cpuGames}")
                     self.logger.debug(f"errors: {errors}")
-                    self.state[guild_id]["state"] = next_state
                     self.state[guild_id]["seen_teams"] = set()
                     time.sleep(1)
                     await message.channel.send(f"Okay, I have the schedule.\n")
@@ -284,7 +300,7 @@ class MyClient(discord.Client):
                                                "tell me the team and I'll give you their schedule. Ready? Go! ")
                     return
                 else:
-                    next_team = self.user_teams[guild_id].pop(0)
+                    next_team = self.state[guild_id]["user_teams"].pop(0)
                     self.state[guild_id]["currTeam"] = next_team
                     await message.channel.send(f"{next_team}")
                 return
@@ -312,7 +328,7 @@ class MyClient(discord.Client):
                 if sum(cpuGames.values()) > 0:
                     msg += "Additionally, schedule "
                     tmp_str = [f"{n} {setting} CPU game{'s' if n != 1 else ''}" for n, setting in
-                               [(int(cpuGames[k]), k) for k, v in cpuGames]]
+                               [(int(cpuGames[k]), k) for k, v in cpuGames.items()]]
                     if int(cpuGames["home"]) != cpuGames["home"]:
                         # Test to see if there is a 0.5 in the dict values - if so, the game can be home or away
                         tmp_str.append(f"1 CPU game that can be either home or away")
@@ -321,13 +337,19 @@ class MyClient(discord.Client):
                 time.sleep(1)
                 self.state[guild_id]["seen_teams"].add(team)
                 if len(self.state[guild_id]["seen_teams"]) == len(self.state[guild_id]["schedule"]):
+                    await message.channel.send(msg)
+                    time.sleep(1)
                     await message.channel.send("That's all the teams. My work here is done. To restart "
                                                "the process, just tag me again.")
-                    next_state = State.READY
-                    self.logger.info(f"Finished, resetting state to {next_state}")
-                    self.state[guild_id] = {"state": next_state}
-                    self._scrape_teams(guild_id)
+                    # TODO: is this causing bug?
+                    # next_state = State.READY
+                    # self.logger.info(f"Finished, resetting state to {next_state}")
+                    # self.state[guild_id] = {"state": next_state}
+                    # TODO: debug this later
+                    # self._scrape_teams(guild_id)
                 else:
+                    await message.channel.send(msg)
+                    time.sleep(1)
                     await message.channel.send("What's the next team you'd like to see the schedule for?")
                 return
 
@@ -339,5 +361,7 @@ def _parse_team_from_display_name(display_name):
     try:
         return standardize(display_name.split("-")[1].split("(")[0].strip())
     except ValueError:
+        return None
+    except IndexError:
         return None
 

@@ -1,3 +1,4 @@
 discord.py==2.4.0
 logging==0.4.9.6
+numpy==2.2.3
 sortedcontainers==2.4.0
