@@ -16,6 +16,9 @@ Next, add the Bot to your discord server(s). The bot supports multiple servers a
 a time and will attempt to infer team names from the display names used in the
 discord server. 
 
+Now, make sure the code is running. Install the necessary packages with 
+`pip install -r requirements.txt`. Then, run `python3 run.py`.
+
 When you're ready to start the process, just tag the bot in Discord: `@ScheduleBot`.
 
 ### Future work
